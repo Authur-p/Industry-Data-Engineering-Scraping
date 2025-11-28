@@ -1,5 +1,6 @@
 import asyncio
 import csv
+from datetime import datetime, timezone
 from playwright.async_api import async_playwright
 
 SEARCH_TERM = "oil and gas"
@@ -20,16 +21,22 @@ async def process_company(browser, company_info):
         # desc = (await company_page.inner_text("div.main-content"))[:500]
 
         phone = await company_page.locator('[itemprop="telephone"] a').all_text_contents()
+        email_element = await company_page.query_selector('a[href^="mailto:"]')
+        if email_element:
+            email_href = await email_element.get_attribute('href')
+            email = email_href.replace("mailto:", "").strip() if email_href else None
+        else:
+            email = 'NIL'
         
         return {
             "company_name": company_info["name"],
             "source_url": url,
             "address": await company_page.text_content('[itemprop="streetAddress"]') if await company_page.locator('[itemprop="streetAddress"]').count() > 0 else None,
             'city': await company_page.text_content('[itemprop="addressLocality"]') if await company_page.locator('[itemprop="addressLocality"]').count() > 0 else None,
-            # "phone": await [int(text.replace(" ", "").strip()) for text in phone if len(phone) > 1 else int(phone.replace(" ", "").strip())] if await company_page.locator('[itemprop="telephone"] a').count() > 0 else None,
-            # "phone": [text.replace(" ", "").strip() for text in phone] if len(phone) > 1 else phone[0].replace(" ", "").strip() if await company_page.locator('[itemprop="telephone"] a').count() > 0 else None,
+            'state': await company_page.text_content('[itemprop="addressRegion"]') if await company_page.locator('[itemprop="addressRegion"]').count() > 0 else None,
             "phone": ", ".join([f"{text.replace(" ", "").strip()}" for text in phone]) if len(phone) > 1 else f"{phone[0].replace(" ", "").strip()}" if phone else None,
-            "website": await company_page.get_attribute("div.cmpny-lstng a", 'href') if await company_page.locator("div.cmpny-lstng a").count() > 0 else None
+            "website": await company_page.get_attribute("div.cmpny-lstng a", 'href') if await company_page.locator("div.cmpny-lstng a").count() > 0 else None,
+            "email": email
         }
     except Exception as e:
         print(f"Error processing {company_info['name']}: {str(e)}")
@@ -39,8 +46,10 @@ async def process_company(browser, company_info):
             "source_url": f"https://finelib.com{company_info['href']}",
             "address": None,
             'city': None,
+            'state': None,
             "phone": None,
             "website": None,
+            'email': None,
             "error": str(e)
         }
 
@@ -96,6 +105,7 @@ async def async_scraping():
                 # Filter out any exceptions
                 for result in page_results:
                     if not isinstance(result, Exception):
+                        result["last_checked"] = datetime.now(timezone.utc).isoformat()
                         all_items.append(result)
 
 
@@ -127,7 +137,7 @@ async def async_scraping():
             valid_items = [item for item in all_items if item is not None]
 
             with open("companies.csv", "w", newline="", encoding="utf-8") as f:
-                fieldnames = ['company_name', 'source_url', 'address', 'city', 'phone', 'website']
+                fieldnames = ['company_name', 'source_url', 'address', 'city', 'state', 'phone', 'website', 'email', 'last_checked']
                 # Add error field if any items have it
                 if any('error' in item for item in valid_items): fieldnames.append('error')  # DYNAMIC FIELDNAMES
                     
