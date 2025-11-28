@@ -1,12 +1,15 @@
 import asyncio
 import csv
+import aiofiles
+import aiofiles.os
 from datetime import datetime, timezone
 from playwright.async_api import async_playwright
 
-SEARCH_TERM = "oil and gas"
+SEARCH_TERM = ["oil and gas", "Microfinance Banks", "Hospitals"]
+CSV_FILE = "companies.csv"
 
 
-async def process_company(browser, company_info):
+async def process_company(browser, company_info, category):
     """Process a single company in parallel"""
 
     context = await browser.new_context()
@@ -29,6 +32,7 @@ async def process_company(browser, company_info):
             email = 'NIL'
         
         return {
+            'category': category,
             "company_name": company_info["name"],
             "source_url": url,
             "address": await company_page.text_content('[itemprop="streetAddress"]') if await company_page.locator('[itemprop="streetAddress"]').count() > 0 else None,
@@ -42,6 +46,7 @@ async def process_company(browser, company_info):
         print(f"Error processing {company_info['name']}: {str(e)}")
         # Return a valid dict with error info instead of None
         return {
+            'category': category,
             "company_name": company_info["name"],
             "source_url": f"https://finelib.com{company_info['href']}",
             "address": None,
@@ -69,7 +74,67 @@ async def extract_company_data(company_element):
         return None 
 
 
-async def async_scraping():
+
+async def write_csv_async(valid_items):
+    file_exists = await aiofiles.os.path.exists(CSV_FILE)
+
+    # 1. Load existing company names to avoid duplicates
+    existing_names = set()
+
+    if file_exists:
+        async with aiofiles.open(CSV_FILE, "r", encoding="utf-8") as f:
+            content = await f.read()
+            lines = content.splitlines()
+            
+            # FIX: Check if file has headers or just data
+            if lines and 'category' in lines[0].lower():  # Has headers
+                reader = csv.DictReader(lines)
+                for row in reader:
+                    if "company_name" in row:
+                        existing_names.add(row["company_name"].strip())
+            else:  # No headers - assume company_name is in second column
+                for line in lines:
+                    if line.strip():  # Skip empty lines
+                        columns = line.strip().split(',')
+                        if len(columns) > 1:  # Make sure there's at least 2 columns
+                            existing_names.add(columns[1].strip().strip('"'))  # Second column is company_name
+
+    # 2. Filter new items (no duplicate company_name)
+    new_items = [item for item in valid_items
+                 if item.get("company_name", "").strip() not in existing_names]
+
+    if not new_items:
+        print("No new companies to write.")
+        return
+
+    # 3. Determine fieldnames dynamically
+    fieldnames = ['category', 'company_name', 'source_url', 'address', 'city',
+                  'state', 'phone', 'website', 'email', 'last_checked']
+
+    if any("error" in item for item in new_items):
+        fieldnames.append("error")
+
+    # 4. Write to CSV (create if not exists, append otherwise)
+    mode = "a" if file_exists else "w"
+
+    async with aiofiles.open(CSV_FILE, mode, newline="", encoding="utf-8") as f:
+        if not file_exists:
+            header_row = ",".join(fieldnames) + "\n"
+            await f.write(header_row)
+
+        # Write each row manually because csv.DictWriter doesn't support aiofiles
+        for item in new_items:
+            row = ",".join(
+                '"' + str(item.get(fn, "")).replace('"', '""') + '"' for fn in fieldnames
+            )
+            await f.write(row + "\n")
+
+    print(f"Added {len(new_items)} new companies to {CSV_FILE}.")
+
+
+
+async def async_scraping(category):
+
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=False)
         page = await browser.new_page()
@@ -78,7 +143,7 @@ async def async_scraping():
             await page.goto("https://finelib.com/")
 
             # Type “oil and gas” into search bar
-            await page.fill("input[name='q']", SEARCH_TERM)
+            await page.fill("input[name='q']", category)
             await page.click("input[type='image']") 
 
             # Wait for the results area
@@ -97,7 +162,7 @@ async def async_scraping():
 
                 # Process companies in parallel
                 tasks = [
-                        process_company(browser, company) 
+                        process_company(browser, company, category) 
                         for company in company_info
                     ]
                 page_results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -135,15 +200,7 @@ async def async_scraping():
 
             # Filter out any remaining None values
             valid_items = [item for item in all_items if item is not None]
-
-            with open("companies.csv", "w", newline="", encoding="utf-8") as f:
-                fieldnames = ['company_name', 'source_url', 'address', 'city', 'state', 'phone', 'website', 'email', 'last_checked']
-                # Add error field if any items have it
-                if any('error' in item for item in valid_items): fieldnames.append('error')  # DYNAMIC FIELDNAMES
-                    
-                writer = csv.DictWriter(f, fieldnames=fieldnames)
-                writer.writeheader()
-                writer.writerows(valid_items)
+            await write_csv_async(valid_items)
 
             print(f"Scraping completed. Saved {len(valid_items)} companies to companies.csv")
             return valid_items
@@ -151,5 +208,35 @@ async def async_scraping():
         except Exception as e:
             print(f"Main scraping error: {e}")
 
+async def category_exists(category_name: str):
+    if not await aiofiles.os.path.exists(CSV_FILE):
+        return False
+
+    async with aiofiles.open(CSV_FILE, "r", encoding="utf-8") as f:
+        content = await f.read()
+        lines = content.strip().split('\n')
+        
+        if not lines:  # Empty file
+            return False
+            
+        reader = csv.DictReader(lines)
+        for row in reader:
+            if row.get('category', '').strip().lower() == category_name.strip().lower():
+                return True
+                
+    return False
+
 # Run async function
-asyncio.run(async_scraping())
+async def main():
+    for category in SEARCH_TERM:
+        exists = await category_exists(category)
+
+        if exists:
+            print(f"Skipping '{category}' - already in CSV")
+        else:
+            print(f"Scraping '{category}' - not found in CSV")
+            await async_scraping(category)
+
+# Run the async entry point
+if __name__ == "__main__":
+    asyncio.run(main())
