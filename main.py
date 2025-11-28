@@ -5,7 +5,7 @@ import aiofiles.os
 from datetime import datetime, timezone
 from playwright.async_api import async_playwright
 
-SEARCH_TERM = ["oil and gas", "Microfinance Banks", "Hospitals"]
+SEARCH_TERM = ["oil and gas", "Microfinance Banks", "Hospitals", "Clinics"]
 CSV_FILE = "companies.csv"
 
 
